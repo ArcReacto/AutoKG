@@ -12,6 +12,7 @@ import graphlearning as gl
 import tiktoken
 import string
 import time
+import os
 
 # graph visualization
 import networkx as nx
@@ -31,15 +32,40 @@ class autoKG():
         self.llm_model = llm_model
         self.source = source
 
-        self.embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-        if embedding:
-            self.vectors = np.array(self.embeddings.embed_documents(self.texts))
-        else:
-            self.vectors = None
+        
+        #self.embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+        # 豆包 embedding 单次上限 256 条，分批调
+        self.embeddings = None  # 占位，后面用裸调
+        
+        MAX_BATCH = 64          # 豆包建议 32~64
+        MAX_RETRY = 3
+        client = openai.OpenAI(
+            api_key=openai_api_key,
+            base_url="https://ark.cn-beijing.volces.com/api/v3"
+        )
+
+        all_vecs = []
+        for i in range(0, len(self.texts), MAX_BATCH):
+            batch = self.texts[i:i + MAX_BATCH]
+            for attempt in range(MAX_RETRY):
+                try:
+                    resp = client.embeddings.create(
+                        model=embedding_model,
+                        input=batch
+                    )
+                    all_vecs += [d.embedding for d in resp.data]
+                    break
+                except openai.RateLimitError:
+                    if attempt == MAX_RETRY - 1:
+                        raise          # 最后一次仍失败就抛出去
+                    time.sleep(2 ** attempt)   # 指数退避 2/4/8 秒
+        self.vectors = np.array(all_vecs, dtype=float)
 
         self.weightmatrix = None
         self.graph = None
-        self.encoding = tiktoken.encoding_for_model(llm_model)
+        #self.encoding = tiktoken.encoding_for_model(llm_model)
+        # 20251208 豆包模型名不在 tiktoken 白名单，手动指定
+        self.encoding = tiktoken.get_encoding("cl100k_base")
         if texts is None:
             self.token_counts = None
         else:
@@ -67,9 +93,26 @@ class autoKG():
         )
         return result["data"][0]["embedding"]
 
+    #20251209 新增豆包裸调接口
+    def _embed(self, texts):
+        """豆包 embedding 分批裸调"""
+        MAX_BATCH = 64
+        all_vecs = []
+        client = openai.OpenAI(api_key=openai.api_key, base_url=openai.api_base)
+        for i in range(0, len(texts), MAX_BATCH):
+            resp = client.embeddings.create(
+                model=self.embedding_model,
+                input=texts[i:i + MAX_BATCH]
+            )
+            all_vecs += [d.embedding for d in resp.data]
+        return np.array(all_vecs, dtype=float)
+
     def update_keywords(self, keyword_list):
         self.keywords = keyword_list
-        self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        #self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        self.keyvectors = self._embed(self.keywords) #20251209
+
+
 
     def make_graph(self, k, method='annoy', similarity='angular', kernel='gaussian'):
         knn_data = gl.weightmatrix.knnsearch(self.vectors, k, method, similarity)
@@ -135,6 +178,8 @@ class autoKG():
     def core_text_filter(self, core_list, max_length):
         if self.llm_model.startswith(("gpt-3.5")):
             model = "gpt-3.5-turbo-16k"
+        elif "doubao" in self.llm_model.lower():   # 20251209 新增
+            model = self.llm_model                 # 直接用豆包接入点
         else:
             model = "gpt-4"
 
@@ -222,7 +267,8 @@ Processed Keywords:
                 i -= 1
 
         self.keywords = strings
-        self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        #self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        self.keyvectors = self._embed(self.keywords)  # 20251209
         return strings
 
     def final_keywords_filter(self):
@@ -315,7 +361,8 @@ Your processed keywords:
         all_tokens += tokens
 
         self.keywords = keyword_string.split(",")
-        self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        #self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        self.keyvectors = self._embed(self.keywords)  #20251209
         return keyword_string, all_tokens
 
     def summary_contents(self, indx, sort_inds, avoid_content=None,
@@ -332,7 +379,7 @@ Your processed keywords:
 
         if model.startswith("gpt-3.5"):
             max_num_tokens = 11900
-        elif model.startswith("gpt-4"):
+        elif model.startswith("gpt-4") or "doubao" in model.lower():   # 20251209 兼容豆包:
             max_num_tokens = 7900
         else:
             raise ValueError("Model should be either GPT-3.5 or GPT-4.")
@@ -481,7 +528,8 @@ Your response:
         cluster_names = list(set(cluster_names))
         output_keywords = list(set(self.keywords or []) | set(cluster_names)) if add_keywords else cluster_names
         self.keywords = process_strings(output_keywords)
-        self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        #self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+        self.keyvectors = self._embed(self.keywords)  #20251209
 
         return cluster_names, all_tokens
 
@@ -489,7 +537,8 @@ Your response:
     def distance_core_seg(self, core_texts, core_labels=None, k=20,
                           dist_metric='cosine', method='annoy', return_full=False, return_prob=False):
         # consider to write coresearch into a subclass
-        core_ebds = np.array(self.embeddings.embed_documents(core_texts))
+        #core_ebds = np.array(self.embeddings.embed_documents(core_texts))
+        core_ebds = np.array(self._embed(core_texts)) #20251209
         if core_labels is None:
             core_labels = np.arange(len(core_ebds))
         else:
@@ -647,13 +696,15 @@ Your response:
             is_valid = False
         if self.keyvectors is None:
             if auto_embedding:
-                self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+                #self.keyvectors = np.array(self.embeddings.embed_documents(self.keywords))
+                self.keyvectors = self._embed(self.keywords)  #20251209
             else:
                 print('Please set up keyword embedding vectors as self.keyvectors')
                 is_valid = False
         if self.vectors is None:
             if auto_embedding:
-                self.keyvectors = np.array(self.embeddings.embed_documents(self.texts))
+                #self.keyvectors = np.array(self.embeddings.embed_documents(self.texts))
+                self.keyvectors = self._embed(self.keywords)  #20251209
             else:
                 print('Please set up texts embedding vectors as self.vectors')
                 is_valid = False
@@ -681,9 +732,11 @@ Your response:
             raise ValueError('Missing Contents')
 
         if isinstance(query, str):
-            query_vec = np.array(self.embeddings.embed_documents([query]))
+            #query_vec = np.array(self.embeddings.embed_documents([query]))
+            query_vec = self._embed([query]) #20251209
         elif isinstance(query, list):
-            query_vec = np.array(self.embeddings.embed_documents(query))
+            #query_vec = np.array(self.embeddings.embed_documents(query))
+            query_vec = self._embed(query) #20251209
         else:
             raise ValueError("query should be either string or list")
 
@@ -787,10 +840,12 @@ Your response:
 
         if model.startswith("gpt-3.5"):
             max_num_tokens = 11900
-        elif model.startswith("gpt-4"):
+        #elif model.startswith("gpt-4"):
+        #20251212增加白名单
+        elif model.startswith("gpt-4") or "doubao" in model.lower():   # 20251212 兼容豆包:
             max_num_tokens = 7900
         else:
-            raise ValueError("Model should be either GPT-3.5 or GPT-4.")
+            raise ValueError("Model should be either GPT-3.5 or GPT-4 or doubao.")
 
         if prompt_keywords:
             header_part = """

@@ -1,6 +1,11 @@
-OPENAI_API_KEY: "your openai api key"
-OPENAI_API_MODEL: "gpt-3.5-turbo"
-EMBEDDING_MODEL: "text-embedding-ada-002"
+# OPENAI_API_KEY: "sk-a4c4c0bc357e4eada71414111283a0d8"
+# OPENAI_API_MODEL: "deepseek-chat"
+# EMBEDDING_MODEL: "deepseek-embedding"
+# OPENAI_API_BASE: "https://api.deepseek.com/v1"  # 新增：指定DeepSeek的API地址
 
 
-
+# config.yaml  20251208 适配豆包
+OPENAI_API_KEY: "93ecc7f2-bd4c-43fc-be6b-c79f1d94d4be"           # 火山引擎控制台 → API Key 管理
+OPENAI_API_BASE: "https://ark.cn-beijing.volces.com/api/v3"   # 固定域名
+OPENAI_API_MODEL: "doubao-1-5-pro-32k-250115"          # 聊天模型：后台创建的推理接入点 ID 
+EMBEDDING_MODEL: "doubao-embedding-large-text-250515"  # 向量模型：同理，用接入点 ID 
